@@ -23,36 +23,3 @@ schedulable_instance_size:
 
 # Uncomment if the cloud doesn't provide cinder / nova volumes:
 use_nova_volumes: VAR_USE_NOVA_VOLUMES # useNovaVolumes=True
-
-## Swift
-
-# There is no way to retrieve them using OpenStack APIs
-# For clouds deployed without swift, remove this part
-swift_hosts: # swiftHosts=host1.example.com host2.example.com
-    - VAR_SWIFT_HOSTS
-
-# There is no API to ask Swift for a list of accounts it knows about.
-# Even if there were, Swift (in common case of Keystone auth, at
-# least) only knows them by the corresponding tenant ID, which would
-# be a less than useful label without post-processing.  The following
-# should point to a file containing one line per tenant, with the
-# tenant name first, then whitespace, followed by the tenant ID.
-keystone_tenants_map: # keystoneTenantsMap="firstname,1234567890 secondname,0987654321"
-  - VAR_KEYSTONE_TENANTS_MAP
-
-# The reseller prefix is typically used by the Swift middleware to
-# keep accounts with different providers separate.  We would ideally
-# look this up dynamically from the Swift configuration.
-# The Keystone middlware defaults to the following value.
-reseller_prefix: VAR_RESELLER_PREFIX # resellerPrefix=AUTH_
-
-ring_path: VAR_RING_PATH # ringPath=/etc/swift
-
-# These will typically be read from /etc/swift/swift.conf.  If that
-# file cannot be opened, then the Swift library will log an error and
-# try to exit.  To run p-s-a-e as a user other than Swift, these
-# settings must be set to the same values as Swift itself, and the
-# above must point to an always-current readable copy of the rings.
-
-hash_path_prefix: VAR_HASH_PATH_PREFIX # hashPathPrefix=
-hash_path_suffix: VAR_HASH_PATH_SUFFIX # hashPathSuffix=
