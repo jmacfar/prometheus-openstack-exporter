@@ -45,9 +45,6 @@ from prometheus_client import CollectorRegistry, generate_latest, Gauge, CONTENT
 from netaddr import IPRange
 
 import random
-import swift.common.utils
-
-from swift.common.ring.ring import Ring
 
 import logging
 import logging.handlers
@@ -530,172 +527,6 @@ class Nova():
         return generate_latest(self.registry)
 
 
-class Swift():
-    def __init__(self):
-        self.registry = CollectorRegistry()
-        self.baseurl = 'http://{}:6000/recon/{}'
-        self.swift_hosts = config.get('swift_hosts', [])
-
-    def gen_up_stats(self):
-        labels = ['cloud', 'hostname']
-        swift_up = Gauge('swift_host_up', 'Swift host reachability',
-                         labels, registry=self.registry)
-        for h in self.swift_hosts:
-            try:
-                requests.get(self.baseurl.format(h, 'diskusage'))
-                swift_up.labels(config['cloud'], h).set(1)
-            except requests.exceptions.RequestException:
-                swift_up.labels(config['cloud'], h).set(0)
-
-    def gen_disk_usage_stats(self):
-        labels = ['cloud', 'hostname', 'device', 'type']
-        swift_disk = Gauge('swift_disk_usage_bytes', 'Swift disk usage in bytes',
-                           labels, registry=self.registry)
-        for h in self.swift_hosts:
-            try:
-                r = requests.get(self.baseurl.format(h, 'diskusage'))
-            except requests.exceptions.RequestException:
-                continue
-            for disk in r.json():
-                if not all([disk.get(i, False) for i in ['size', 'used', 'device']]):
-                    continue
-                swift_disk.labels(config['cloud'], h, disk['device'], 'size').set(int(disk['size']))
-                swift_disk.labels(config['cloud'], h, disk['device'], 'used').set(int(disk['used']))
-
-    def gen_quarantine_stats(self):
-        labels = ['cloud', 'hostname', 'ring']
-        swift_quarantine = Gauge('swift_quarantined_objects', 'Number of quarantined objects',
-                                 labels, registry=self.registry)
-        for h in self.swift_hosts:
-            try:
-                r = requests.get(self.baseurl.format(h, 'quarantined'))
-            except requests.exceptions.RequestException:
-                continue
-            for ring in ['accounts', 'objects', 'containers']:
-                swift_quarantine.labels(config['cloud'], h, ring).set(r.json().get(ring))
-
-    def _get_object_ring_replication_stats(self, h, swift_repl_duration):
-        # Object replication is special
-        try:
-            r = requests.get(self.baseurl.format(h, 'replication/object'))
-        except requests.exceptions.RequestException:
-            return
-        try:
-            swift_repl_duration.labels(config['cloud'], h, 'object').set(r.json()['object_replication_time'])
-        except TypeError:
-            print(traceback.format_exc())
-
-    def _get_ring_replication_stats(self, ring, h, swift_repl_duration, swift_repl):
-        metrics = ['attempted', 'diff', 'diff_capped', 'empty',
-                   'failure', 'hashmatch', 'no_change', 'remote_merge',
-                   'remove', 'rsync', 'success', 'ts_repl']
-        try:
-            r = requests.get(self.baseurl.format(h, 'replication/' + ring))
-        except requests.exceptions.RequestException:
-            return
-        try:
-            swift_repl_duration.labels(config['cloud'], h, ring).set(r.json()['replication_time'])
-        except TypeError:
-            print(traceback.format_exc())
-
-        for metric in metrics:
-            try:
-                swift_repl.labels(config['cloud'], h, ring, metric).set(r.json()['replication_stats'][metric])
-            except TypeError:
-                print(traceback.format_exc())
-
-    def gen_replication_stats(self):
-        labels = ['cloud', 'hostname', 'ring', 'type']
-        swift_repl = Gauge('swift_replication_stats', 'Swift replication stats', labels, registry=self.registry)
-        labels = ['cloud', 'hostname', 'ring']
-        swift_repl_duration = Gauge('swift_replication_duration_seconds', 'Swift replication duration in seconds',
-                                    labels, registry=self.registry)
-        for h in self.swift_hosts:
-            self._get_object_ring_replication_stats(h, swift_repl_duration)
-            for ring in ['account', 'container']:
-                self._get_ring_replication_stats(ring, h, swift_repl_duration, swift_repl)
-
-    def get_stats(self):
-        self.gen_up_stats()
-        self.gen_disk_usage_stats()
-        self.gen_quarantine_stats()
-        self.gen_replication_stats()
-        return generate_latest(self.registry)
-
-
-class SwiftAccountUsage():
-    def __init__(self):
-        self.registry = CollectorRegistry()
-
-        self.hash_path_prefix = config.get('hash_path_prefix', None)
-        if self.hash_path_prefix:
-            swift.common.utils.HASH_PATH_PREFIX = self.hash_path_prefix
-        self.hash_path_suffix = config.get('hash_path_suffix', None)
-        if self.hash_path_suffix:
-            swift.common.utils.HASH_PATH_SUFFIX = self.hash_path_suffix
-
-        self.reseller_prefix = config.get('reseller_prefix', 'AUTH_')
-        self.ring_path = config.get('ring_path', '/etc/swift')
-
-        try:
-            self.account_ring = self._get_account_ring()
-        except SystemExit:
-            # Most likely raised by swift.common.utils.validate_configuration().
-            raise Exception(
-                "Is swift.conf readable or at least one hash path variable configured?")
-
-    def _read_keystone_tenants_map(self, map_path):
-        if not map_path:
-            return {}
-
-        m = {}
-        with open(map_path) as km:
-            line = km.readline()
-            while line != '':
-                name, id = line.strip().split()
-                m[name] = id
-                line = km.readline()
-
-        return m
-
-    def _get_account_ring(self):
-        """Read the account ring from the configured location, and return it."""
-        return Ring(
-            serialized_path=self.ring_path,
-            ring_name='account',
-            )
-
-    def _get_account_usage(self, account):
-        partition, nodes = self.account_ring.get_nodes(account=account)
-        node = random.choice(nodes)
-        account_url = 'http://{ip}:{port}/{device}/{partition}/{account}'.format(
-            account=account,
-            partition=partition,
-            **node)
-        response = requests.head(account_url)
-        if response.status_code == 204:
-            return int(response.headers['X-Account-Bytes-Used'])
-        else:
-            return 0
-
-    def gen_account_stats(self):
-        self.keystone_tenants_map = self._read_keystone_tenants_map(
-            config.get('keystone_tenants_map', None))
-        labels = ['cloud', 'swift_account', 'tenant']
-        swift_account = Gauge(
-            'swift_account_bytes_used', 'Swift account usage in bytes', labels, registry=self.registry)
-
-        for tenant_name, tenant_id in self.keystone_tenants_map.iteritems():
-            account = self.reseller_prefix + tenant_id
-            bytes_used = self._get_account_usage(account)
-
-            swift_account.labels(config['cloud'], account, tenant_name).set(bytes_used)
-
-    def get_stats(self):
-        self.gen_account_stats()
-        return generate_latest(self.registry)
-
-
 class ForkingHTTPServer(ForkingMixIn, HTTPServer):
     pass
 
@@ -705,9 +536,7 @@ COLLECTORS = {
     'cinder': Cinder,
     'neutron': Neutron,
     'nova': Nova,
-    'swift': Swift,
-    'swift-account-usage': SwiftAccountUsage,
-    }
+}
 
 DATA_GATHERER_USERS = [
     'cinder',
@@ -721,7 +550,7 @@ def get_collectors(collectors):
     # specify default set of collectors before commit 662b70f and f27cda8.
     # https://github.com/CanonicalLtd/prometheus-openstack-exporter/issues/80
     if not collectors:
-        return ['cinder', 'swift', 'nova', 'neutron']
+        return ['cinder', 'nova', 'neutron']
     return collectors
 
 
